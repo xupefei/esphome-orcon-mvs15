@@ -70,10 +70,10 @@ sensor:
 # RAMSES II transport (CC1101 @ 868.3 MHz)
 # -----------------------------------------------------------------------------
 external_components:
-  # Patched fork: fixes a heap-corruption bug where RamsesMessage (containing a
-  # std::string) was memcpy'd through FreeRTOS queues. Pinned to a commit for
-  # reproducible builds. Upstream: github://wlcrs/esphome-ramses
-  - source: github://xupefei/esphome-ramses@22e32c97de6a19da8845955a082e183076b1491a
+  # Vendored locally under components/ramses_esp (patched for a heap-corruption
+  # bug — see components/ramses_esp/LOCAL_CHANGES.md). Self-contained: no fetch
+  # at build time. Upstream: https://github.com/wlcrs/esphome-ramses (MIT).
+  - source: components
     components: [ramses_esp]
 
 ramses_esp:

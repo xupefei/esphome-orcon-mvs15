@@ -84,7 +84,9 @@ State readback (`31D9 003 0000XX`): `00` Away / `01` Low / `02` Medium / `03` Hi
 ## Credits
 
 - [`wlcrs/esphome-ramses`](https://github.com/wlcrs/esphome-ramses) — the ESPHome
-  CC1101 / RAMSES II transport component this config depends on.
+  CC1101 / RAMSES II transport component. A patched copy is vendored here under
+  [`components/ramses_esp/`](components/ramses_esp/) (MIT; see its `LICENSE` and
+  `LOCAL_CHANGES.md`).
 - [`IndaloTech/ramses_esp`](https://github.com/IndaloTech/ramses_esp) — the reference
   firmware and hardware (Peter Price).
 - [`bitboxx/orcon-mvs15-rf`](https://github.com/bitboxx/orcon-mvs15-rf) — documented
@@ -93,7 +95,9 @@ State readback (`31D9 003 0000XX`): `00` Away / `01` Low / `02` Medium / `03` Hi
 
 ## Notes
 
-- `wlcrs/esphome-ramses` is a community/third-party component pulled from GitHub at
-  build time. Pin it to a specific commit with `ref:` for reproducible builds.
+- The RAMSES component is **vendored locally** (`components/ramses_esp/`) and loaded
+  via `external_components: - source: components`, so builds are self-contained and
+  reproducible with no network fetch. It carries a heap-corruption fix over upstream
+  — see `components/ramses_esp/LOCAL_CHANGES.md`.
 - This impersonates a remote your fan already knows; it does not pair. The physical
   remote keeps working.
