@@ -275,7 +275,7 @@ void RamsesFrameHandler::handle_rx_done() {
 
   if (this->current_msg_.is_valid()) {
     std::string hgi80 = this->current_msg_.to_hgi80();
-    ESP_LOGD(TAG, "RX: %s", hgi80.c_str());  // DEBUG level: the 868 band is chatty
+    ESP_LOGI(TAG, "RX: %s", hgi80.c_str());  // INFO so received frames are visible
     if (this->on_message_cb_ != nullptr) {
       this->on_message_cb_(this->current_msg_);
     }
