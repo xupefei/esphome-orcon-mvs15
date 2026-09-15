@@ -70,7 +70,10 @@ sensor:
 # RAMSES II transport (CC1101 @ 868.3 MHz)
 # -----------------------------------------------------------------------------
 external_components:
-  - source: github://wlcrs/esphome-ramses
+  # Patched fork: fixes a heap-corruption bug where RamsesMessage (containing a
+  # std::string) was memcpy'd through FreeRTOS queues. Pinned to a commit for
+  # reproducible builds. Upstream: github://wlcrs/esphome-ramses
+  - source: github://xupefei/esphome-ramses@22e32c97de6a19da8845955a082e183076b1491a
     components: [ramses_esp]
 
 ramses_esp:
@@ -145,7 +148,7 @@ select:
           else if (x == "Medium") cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000204";
           else if (x == "High")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000304";
           else if (x == "Auto")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000404";
-          if (!cmd.empty()) id(ramses_hub)->send_hgi80_command(cmd);
+          if (!cmd.empty()) id(ramses_hub).send_hgi80_command(cmd);
           id(orcon_speed).publish_state(x);
       - script.execute: blink_tx      # flash green on send
 
