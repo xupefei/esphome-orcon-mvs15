@@ -18,15 +18,15 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x07, // CC_FIFOTHR  default
     0xD3, // CC_SYNC1    default
     0x91, // CC_SYNC0    default
-    0x3D, // CC_PKTLEN   default
+    0xFF, // CC_PKTLEN   native default
     0x04, // CC_PKTCTRL1 default
     0x31, // CC_PKTCTRL0 Asynchronous Serial, TX on GDO0, RX on GDOx
     0x00, // CC_ADDR     default
     0x00, // CC_CHANNR   default
     0x0F, // CC_FSCTRL1  default
-    0x00, // CC_FSCTRL0  (correction moved to FREQ regs below; AFC ignored this)
-    0x21, // CC_FREQ2    868.3 MHz (native default; crystal offset is harmless — the
-    0x65, // CC_FREQ1    native firmware transmits reliably with the exact same value)
+    0x00, // CC_FSCTRL0
+    0x21, // CC_FREQ2    868.3 MHz
+    0x65, // CC_FREQ1
     0x6A, // CC_FREQ0
     0x6A, // CC_MDMCFG4
     0x83, // CC_MDMCFG3  DRATE_M=131 data rate=38,383.48Hz
@@ -74,13 +74,6 @@ bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi,
 
   this->spi_reset();
 
-  // spi_bus_config_t buscfg = {};
-  // buscfg.mosi_io_num = this->mosi_pin_;
-  // buscfg.miso_io_num = this->miso_pin_;
-  // buscfg.sclk_io_num = this->sck_pin_;
-  // buscfg.quadwp_io_num = -1;
-  // buscfg.quadhd_io_num = -1;
-  // buscfg.max_transfer_sz = 64;
   spi_bus_config_t buscfg = {
       .mosi_io_num = this->mosi_pin_,
       .miso_io_num = this->miso_pin_,
@@ -97,7 +90,7 @@ bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi,
 
   spi_device_interface_config_t devcfg = {};
   devcfg.mode = 0;
-  devcfg.clock_speed_hz = 10000000; // 10 MHz
+  devcfg.clock_speed_hz = 1000000;
   devcfg.spics_io_num = this->cs_pin_;
   devcfg.flags = SPI_DEVICE_NO_DUMMY;
   devcfg.queue_size = 7;
@@ -221,11 +214,9 @@ void CC1101Driver::apply_ramses_config() {
   for (uint8_t i = 0; i < CC_PARAM_MAX; i++) {
     this->write_reg(i, CC_RAMSES_CFG[i]);
   }
-  // TX Fifo Threshold 17
-  this->write_reg(CC_FIFOTHR, (CC_RAMSES_CFG[CC_FIFOTHR] & 0xF0) + 11);
-  for (uint8_t i = 0; i < CC_PA_MAX; i++) {
-    this->write_reg(CC_PATABLE, CC_DEFAULT_PA[i]);
-  }
+  // Match the factory firmware: five-byte TX threshold and one PA entry.
+  this->write_reg(CC_FIFOTHR, (CC_RAMSES_CFG[CC_FIFOTHR] & 0xF0) + 14);
+  this->write_reg(CC_PATABLE, CC_DEFAULT_PA[0]);
   this->enter_rx_mode();
   ESP_LOGI(TAG, "CC1101 configured for RAMSES II RX (868.3 MHz)");
 }

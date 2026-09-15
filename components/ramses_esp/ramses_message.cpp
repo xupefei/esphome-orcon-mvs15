@@ -236,9 +236,7 @@ bool RamsesMessage::from_hgi80(const std::string &line) {
   else if (verb == "RP") this->type = RAMSES_MSG_RP;
   else return false;
 
-  // Carry the verb into the header field bits. to_raw_frame() and the checksum
-  // both read the message type from `fields`, so without this every transmitted
-  // frame defaults to RQ (a read request) — the fan replies but never acts.
+  // Encoding and checksums read the verb from fields.
   this->fields |= static_cast<uint8_t>(this->type) & RAMSES_F_MASK;
 
   // Optional Param0
@@ -305,11 +303,7 @@ bool RamsesMessage::from_hgi80(const std::string &line) {
   return true;
 }
 
-// --- Native-compatible async TX bit encoder (ported from IndaloTech ramses_esp) ---
-// RAMSES transmits every byte as UART async serial: bit-reversed, wrapped with
-// start/stop framing bits, then bit-packed into CC1101 FIFO octets. Without this
-// framing the fan's UART-based receiver cannot decode our packets. (RX is
-// unaffected: the ESP's UART hardware strips the framing on the way in.)
+// IndaloTech-compatible asynchronous UART bit packing.
 static uint8_t tx_swap4(uint8_t in) {
   static const uint8_t out[16] = {0x0, 0x8, 0x4, 0xC, 0x2, 0xA, 0x6, 0xE,
                                   0x1, 0x9, 0x5, 0xD, 0x3, 0xB, 0x7, 0xF};
@@ -320,8 +314,7 @@ static uint8_t tx_swap8(uint8_t in) {
 }
 
 std::vector<uint8_t> RamsesMessage::to_raw_frame() const {
-  // 1. Logical byte stream fed through the framing encoder:
-  //    prefix (preamble + sync + magic header) + manchester(message) + suffix.
+  // Preamble, sync word, header, Manchester payload, and suffix.
   std::vector<uint8_t> logical = {0x55, 0x55, 0x55, 0x55, 0x55,  // preamble
                                   0xFF, 0x00,                     // sync word
                                   0x33, 0x55, 0x53};              // magic header
@@ -349,8 +342,7 @@ std::vector<uint8_t> RamsesMessage::to_raw_frame() const {
   logical.push_back(0x35);  // trailer
   logical.push_back(0x55);  // training
 
-  // 2. Bit-pack with UART framing into FIFO octets, after a prime + break.
-  //    (The native firmware needs a leading zero byte to start TX cleanly.)
+  // UART framing after the factory prime and break sequence.
   std::vector<uint8_t> fifo = {0x00, 0xFF, 0x00, 0x00};
 
   uint16_t reg = 0;  // high byte = output "data", low byte = pending "bits"

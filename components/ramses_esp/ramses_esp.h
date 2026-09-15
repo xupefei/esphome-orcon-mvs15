@@ -76,6 +76,7 @@ class RamsesESPComponent : public Component {
   std::vector<int> client_fds_;
 
   bool paused_{false};
+  uint32_t last_tx_ms_{0};
 
   std::vector<std::function<void(const std::string &)>> on_message_callbacks_;
 };

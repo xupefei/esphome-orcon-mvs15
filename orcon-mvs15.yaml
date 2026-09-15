@@ -78,24 +78,17 @@ external_components:
 
 ramses_esp:
   id: ramses_hub
-  # ---- CC1101 pins as wired on the IndaloTech ramses_esp ESP32-S3 board ----
-  # (from the firmware's Kconfig defaults; no external wiring needed).
+  # IndaloTech ramses_esp pinout.
   cs_pin: GPIO38
   sck_pin: GPIO36
   mosi_pin: GPIO35
   miso_pin: GPIO37
-  # NOTE: in this component `gdo0_pin` is the UART *RX* pin and `gdo2_pin` is the
-  # UART *TX* pin. The CC1101 emits demodulated RX data on GDO2 (IOCFG2=0x0D) and
-  # takes TX data on GDO0 — so UART RX must sit on the board's GDO2, and TX on GDO0.
-  # This matches the native firmware's uart_set_pin(tx=GDO0, rx=GDO2).
-  gdo0_pin: GPIO40       # UART RX  <- CC1101 GDO2 (demodulated data out) = board GPIO40
-  gdo2_pin: GPIO39       # UART TX  -> CC1101 GDO0 (TX data)              = board GPIO39
+  gdo0_pin: GPIO40       # UART RX from CC1101 GDO2
+  gdo2_pin: GPIO39       # CC1101 GDO0 FIFO status
   # uart_num: 1          # default
   on_message:
     - lambda: |-
-        // The fan announces its current speed unprompted:
-        //   ... 31D9 003 0000XX   where XX = 00 Away / 01 Low / 02 Med / 03 High / 04 Auto
-        // Only react to OUR fan (the network has several 29:x units + sensors).
+        // 31D9 003 0000XX: Away 00, Low 01, Medium 02, High 03, Auto 04.
         const std::string &s = x;
         if (s.find("${fan_id}") == std::string::npos) return;
         auto p = s.find("31D9 003 ");
@@ -135,21 +128,13 @@ script:
       - output.turn_on: led_tx
       - delay: 40ms
       - output.turn_off: led_tx
-  # Transmit a RAMSES command several times, spaced out (~1s total). Your 868 MHz
-  # band is congested enough that a single send — even with listen-before-talk —
-  # isn't reliable; repeating it a few times lands one cleanly. Each send is
-  # itself gated on a quiet channel in firmware (listen-before-talk).
   - id: send_ramses
     parameters:
       cmd: string
     mode: restart
     then:
-      - repeat:
-          count: 6
-          then:
-            - lambda: "if (!cmd.empty()) id(ramses_hub).send_hgi80_command(cmd);"
-            - script.execute: blink_tx
-            - delay: 200ms
+      - lambda: "if (!cmd.empty()) id(ramses_hub).send_hgi80_command(cmd);"
+      - script.execute: blink_tx
 
 # -----------------------------------------------------------------------------
 # Speed control (22F1) — one HA entity, verified payloads
@@ -169,7 +154,6 @@ select:
           else if (x == "Medium") cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000204";
           else if (x == "High")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000304";
           else if (x == "Auto")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000404";
-          // Fire the command as a spaced-out repeat burst (see send_ramses).
           if (!cmd.empty()) id(send_ramses).execute(cmd);
           id(orcon_speed).publish_state(x);
 

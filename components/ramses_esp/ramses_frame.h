@@ -38,6 +38,7 @@ class RamsesFrameHandler {
   // True while a RAMSES frame is actively being received — used for
   // listen-before-talk so we don't transmit on top of an incoming frame.
   bool rx_in_progress() const { return this->rx_state_ == FRM_RX_MESSAGE; }
+  uint32_t last_frame_ms() const { return this->last_frame_ms_; }
 
  protected:
   void process_rx_byte(uint8_t b);
@@ -60,6 +61,7 @@ class RamsesFrameHandler {
   RamsesMessage current_msg_;
   uint8_t msg_parse_state_{0};
   uint8_t msg_field_count_{0};
+  volatile uint32_t last_frame_ms_{0};
 
   std::function<void(const RamsesMessage &)> on_message_cb_{nullptr};
 };

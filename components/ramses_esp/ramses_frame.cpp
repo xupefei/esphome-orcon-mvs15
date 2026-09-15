@@ -1,6 +1,7 @@
 #include "ramses_frame.h"
 #include "ramses_codec.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 #include <sys/time.h>
 #include <ctime>
 
@@ -113,6 +114,7 @@ void RamsesFrameHandler::work() {
     } else if (event.type == UART_BUFFER_FULL || event.type == UART_FIFO_OVF) {
       uart_flush_input(this->uart_num_);
       xQueueReset(this->uart_queue_);
+      this->last_frame_ms_ = millis();
       this->rx_state_ = FRM_RX_IDLE;
       this->reset_rx();
     }
@@ -123,6 +125,7 @@ void RamsesFrameHandler::work() {
     this->rx_state_ = FRM_RX_IDLE;
     this->reset_rx();
   } else if (this->rx_state_ == FRM_RX_ABORT) {
+    this->last_frame_ms_ = millis();
     this->rx_state_ = FRM_RX_IDLE;
     this->reset_rx();
   }
@@ -269,6 +272,10 @@ void RamsesFrameHandler::process_rx_byte(uint8_t b) {
 }
 
 void RamsesFrameHandler::handle_rx_done() {
+  // Factory firmware starts its 50 ms TX guard after every completed or
+  // aborted receive, regardless of whether the decoded message is valid.
+  this->last_frame_ms_ = millis();
+
   if (this->cc1101_ != nullptr) {
     this->current_msg_.rssi = this->cc1101_->read_rssi();
   }

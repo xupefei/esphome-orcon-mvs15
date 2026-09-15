@@ -15,10 +15,7 @@ static const char *const TAG = "ramses_esp";
 namespace esphome {
 namespace ramses_esp {
 
-// RamsesMessage is copied by value through FreeRTOS queues (raw memcpy), so it
-// must remain trivially copyable. A std::string/std::vector member here would
-// be memcpy'd, aliasing its internal pointer and causing heap corruption
-// (double-free, or free of a non-heap pointer). See the queues in setup().
+// FreeRTOS queues copy items with memcpy.
 static_assert(std::is_trivially_copyable<RamsesMessage>::value,
               "RamsesMessage must stay trivially copyable (passed via memcpy through FreeRTOS queues)");
 
@@ -47,10 +44,7 @@ void RamsesESPComponent::setup() {
     }
   });
 
-  // We transmit via the CC1101 FIFO (never UART TX), so repurpose the GDO0 line
-  // as a plain input and read the radio's hardware TX-FIFO-threshold flag during
-  // TX — exactly like the native firmware. Reading the TXBYTES register instead
-  // hits a documented CC1101 read erratum that corrupted our transmit.
+  // TX uses the FIFO; GDO0 reports its threshold and empty states.
   gpio_reset_pin(this->gdo2_pin_);
   gpio_set_direction(this->gdo2_pin_, GPIO_MODE_INPUT);
   gpio_set_pull_mode(this->gdo2_pin_, GPIO_PULLDOWN_ONLY);
@@ -142,7 +136,6 @@ void RamsesESPComponent::start_tcp_server() {
 }
 
 void RamsesESPComponent::loop() {
-  // 1. Drain decoded incoming RAMSES messages from Radio queue
   RamsesMessage rx_msg;
   while (this->rx_msg_queue_ != nullptr && xQueueReceive(this->rx_msg_queue_, &rx_msg, 0) == pdTRUE) {
     std::string hgi80 = rx_msg.to_hgi80();
@@ -152,10 +145,8 @@ void RamsesESPComponent::loop() {
     }
   }
 
-  // 2. Accept and manage TCP clients
   this->handle_tcp_clients();
 
-  // 3. Process outbound RAMSES messages
   if (!this->paused_) {
     this->process_tx_queue();
   }
@@ -164,7 +155,6 @@ void RamsesESPComponent::loop() {
 void RamsesESPComponent::handle_tcp_clients() {
   if (this->server_fd_ < 0) return;
 
-  // Accept new clients
   struct sockaddr_in source_addr;
   socklen_t addr_len = sizeof(source_addr);
   int client_fd = accept(this->server_fd_, (struct sockaddr *)&source_addr, &addr_len);
@@ -175,7 +165,6 @@ void RamsesESPComponent::handle_tcp_clients() {
              inet_ntoa(source_addr.sin_addr), (int)this->client_fds_.size());
   }
 
-  // Read data from existing clients
   for (auto it = this->client_fds_.begin(); it != this->client_fds_.end();) {
     int fd = *it;
     char rx_buffer[256];
@@ -183,7 +172,6 @@ void RamsesESPComponent::handle_tcp_clients() {
     if (len > 0) {
       rx_buffer[len] = '\0';
       std::string line(rx_buffer);
-      // Remove trailing CR/LF
       line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
       line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
       if (!line.empty()) {
@@ -230,39 +218,52 @@ bool RamsesESPComponent::send_hgi80_command(const std::string &cmd) {
 
 void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
-  if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
+  if (this->tx_msg_queue_ != nullptr && xQueuePeek(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
+    constexpr uint32_t MIN_TX_DELAY_MS = 50;
+    uint32_t now = millis();
+    uint32_t last_frame = std::max(this->frame_handler_.last_frame_ms(), this->last_tx_ms_);
+    if (this->frame_handler_.rx_in_progress() || now - last_frame <= MIN_TX_DELAY_MS) return;
+
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      const int TX_REPEATS = 1;  // repeats are spaced out in YAML to dodge collisions
+      if (xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) != pdTRUE) {
+        xSemaphoreGive(this->radio_mutex_);
+        return;
+      }
+
       ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
 
       this->frame_handler_.rx_disable();
       std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
 
-      for (int rep = 0; rep < TX_REPEATS; rep++) {
-        this->cc1101_.enter_idle_mode();
-        this->cc1101_.write_reg(CC_PKTCTRL0, 0x02);  // FIFO mode, infinite packet
-        this->cc1101_.write_reg(CC_IOCFG0, 0x02);    // GDO0 = TX-FIFO-threshold flag
-        this->cc1101_.strobe(CC_SFTX);
-
-        // Native transport, 1:1: STX into an EMPTY FIFO first, then stream bytes
-        // gated by the hardware GDO0 flag (LOW = FIFO below threshold = room to
-        // write; HIGH = at/above threshold = wait). No TXBYTES reads. The first
-        // byte written is raw_frame[0]=0x00 — native's TX-start prime.
-        for (int i = 0; i < 200 && CC_STATE(this->cc1101_.strobe(CC_STX)) != CC_STATE_TX; i++) {
-        }
-
-        size_t sent = 0;
-        uint32_t t0 = millis();
-        while (sent < raw_frame.size() && (millis() - t0 < 300)) {
-          if (gpio_get_level(this->gdo2_pin_) == 0) {  // room in the FIFO
-            this->cc1101_.write_fifo(raw_frame[sent++]);
-          }
-        }
-
-        // Let the FIFO residue transmit, then stop cleanly.
-        vTaskDelay(pdMS_TO_TICKS(8));
-        this->cc1101_.enter_idle_mode();
+      this->cc1101_.enter_tx_mode();
+      size_t sent = 0;
+      while (sent < std::min<size_t>(4, raw_frame.size())) {
+        this->cc1101_.write_fifo(raw_frame[sent++]);
       }
+
+      uint32_t feed_start = millis();
+      while (sent < raw_frame.size() && millis() - feed_start < 300) {
+        if (gpio_get_level(this->gdo2_pin_) == 0) {
+          size_t block_end = std::min(sent + 5, raw_frame.size());
+          while (sent < block_end) this->cc1101_.write_fifo(raw_frame[sent++]);
+        }
+      }
+
+      if (sent != raw_frame.size()) {
+        ESP_LOGW(TAG, "TX FIFO feed timed out (%u/%u bytes)",
+                 (unsigned) sent, (unsigned) raw_frame.size());
+      } else {
+        this->cc1101_.fifo_end();
+        uint32_t empty_start = millis();
+        while (gpio_get_level(this->gdo2_pin_) == 0 && millis() - empty_start < 100) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        if (gpio_get_level(this->gdo2_pin_) == 0) {
+          ESP_LOGW(TAG, "TX FIFO-empty signal timed out");
+        }
+      }
+      this->cc1101_.enter_idle_mode();
+      this->last_tx_ms_ = millis();
 
       this->cc1101_.apply_ramses_config();
       this->frame_handler_.rx_enable();
