@@ -51,6 +51,21 @@ web_server:
   #   username: admin
   #   password: !secret web_password
 
+# Weekly reboot based on uptime — no clock/internet needed. Reboots once the
+# device has been up for 7 days (checked every minute).
+sensor:
+  - platform: uptime
+    id: uptime_sensor
+    name: "Uptime"
+    update_interval: 60s
+    on_value:
+      - if:
+          condition:
+            lambda: "return x >= 7 * 24 * 3600;"   # 604800 s = 7 days
+          then:
+            - logger.log: "Weekly uptime restart"
+            - button.press: restart_btn
+
 # -----------------------------------------------------------------------------
 # RAMSES II transport (CC1101 @ 868.3 MHz)
 # -----------------------------------------------------------------------------
@@ -159,6 +174,12 @@ button:
       - script.execute: blink_tx
       - ramses_esp.send_hgi80:
           command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00023C03040000"
+
+  # Manual restart, and the target for the weekly scheduled reboot.
+  - platform: restart
+    name: "Restart"
+    id: restart_btn
+    entity_category: diagnostic
 
 # -----------------------------------------------------------------------------
 # OPTIONAL — humidity readback (12A0). The fan replies to an RQ with an RP.
