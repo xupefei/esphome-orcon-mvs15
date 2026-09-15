@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <type_traits>
+#include "driver/gpio.h"
 
 static const char *const TAG = "ramses_esp";
 
@@ -45,6 +46,14 @@ void RamsesESPComponent::setup() {
       xQueueSend(this->rx_msg_queue_, &msg, 0);
     }
   });
+
+  // We transmit via the CC1101 FIFO (never UART TX), so repurpose the GDO0 line
+  // as a plain input and read the radio's hardware TX-FIFO-threshold flag during
+  // TX — exactly like the native firmware. Reading the TXBYTES register instead
+  // hits a documented CC1101 read erratum that corrupted our transmit.
+  gpio_reset_pin(this->gdo2_pin_);
+  gpio_set_direction(this->gdo2_pin_, GPIO_MODE_INPUT);
+  gpio_set_pull_mode(this->gdo2_pin_, GPIO_PULLDOWN_ONLY);
 
   xTaskCreatePinnedToCore(
       RamsesESPComponent::radio_task_trampoline,
@@ -223,26 +232,37 @@ void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
+      const int TX_REPEATS = 1;  // repeats are spaced out in YAML to dodge collisions
       ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
 
       this->frame_handler_.rx_disable();
-      this->cc1101_.enter_idle_mode();
-
       std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
-      this->cc1101_.enter_tx_mode();
 
-      size_t sent = 0;
-      uint32_t start_ms = millis();
-      while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
-        uint8_t space = this->cc1101_.write_fifo(raw_frame[sent++]);
-        if (space < 2) {
-          vTaskDelay(pdMS_TO_TICKS(2));
+      for (int rep = 0; rep < TX_REPEATS; rep++) {
+        this->cc1101_.enter_idle_mode();
+        this->cc1101_.write_reg(CC_PKTCTRL0, 0x02);  // FIFO mode, infinite packet
+        this->cc1101_.write_reg(CC_IOCFG0, 0x02);    // GDO0 = TX-FIFO-threshold flag
+        this->cc1101_.strobe(CC_SFTX);
+
+        // Native transport, 1:1: STX into an EMPTY FIFO first, then stream bytes
+        // gated by the hardware GDO0 flag (LOW = FIFO below threshold = room to
+        // write; HIGH = at/above threshold = wait). No TXBYTES reads. The first
+        // byte written is raw_frame[0]=0x00 — native's TX-start prime.
+        for (int i = 0; i < 200 && CC_STATE(this->cc1101_.strobe(CC_STX)) != CC_STATE_TX; i++) {
         }
-      }
 
-      this->cc1101_.fifo_end();
-      // Wait for transmission completion
-      vTaskDelay(pdMS_TO_TICKS(15));
+        size_t sent = 0;
+        uint32_t t0 = millis();
+        while (sent < raw_frame.size() && (millis() - t0 < 300)) {
+          if (gpio_get_level(this->gdo2_pin_) == 0) {  // room in the FIFO
+            this->cc1101_.write_fifo(raw_frame[sent++]);
+          }
+        }
+
+        // Let the FIFO residue transmit, then stop cleanly.
+        vTaskDelay(pdMS_TO_TICKS(8));
+        this->cc1101_.enter_idle_mode();
+      }
 
       this->cc1101_.apply_ramses_config();
       this->frame_handler_.rx_enable();

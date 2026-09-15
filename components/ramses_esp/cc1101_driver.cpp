@@ -24,9 +24,9 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x00, // CC_ADDR     default
     0x00, // CC_CHANNR   default
     0x0F, // CC_FSCTRL1  default
-    0x00, // CC_FSCTRL0  default
-    0x21, // CC_FREQ2    868.3 MHz
-    0x65, // CC_FREQ1
+    0x00, // CC_FSCTRL0  (correction moved to FREQ regs below; AFC ignored this)
+    0x21, // CC_FREQ2    868.3 MHz (native default; crystal offset is harmless — the
+    0x65, // CC_FREQ1    native firmware transmits reliably with the exact same value)
     0x6A, // CC_FREQ0
     0x6A, // CC_MDMCFG4
     0x83, // CC_MDMCFG3  DRATE_M=131 data rate=38,383.48Hz

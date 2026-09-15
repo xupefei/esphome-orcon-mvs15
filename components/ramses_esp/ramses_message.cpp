@@ -236,6 +236,11 @@ bool RamsesMessage::from_hgi80(const std::string &line) {
   else if (verb == "RP") this->type = RAMSES_MSG_RP;
   else return false;
 
+  // Carry the verb into the header field bits. to_raw_frame() and the checksum
+  // both read the message type from `fields`, so without this every transmitted
+  // frame defaults to RQ (a read request) — the fan replies but never acts.
+  this->fields |= static_cast<uint8_t>(this->type) & RAMSES_F_MASK;
+
   // Optional Param0
   if (idx < tokens.size() && (tokens[idx] == "---" || isdigit(tokens[idx][0]))) {
     if (tokens[idx] != "---") {
@@ -300,49 +305,86 @@ bool RamsesMessage::from_hgi80(const std::string &line) {
   return true;
 }
 
-std::vector<uint8_t> RamsesMessage::to_raw_frame() const {
-  std::vector<uint8_t> frame;
-  // Preamble training sequence
-  for (int i = 0; i < 20; i++) {
-    frame.push_back(0x55);
-  }
-  // Sync bytes
-  frame.push_back(0xFF);
-  frame.push_back(0x00);
-  frame.push_back(0x33);
-  frame.push_back(0x55);
-  frame.push_back(0x53);
+// --- Native-compatible async TX bit encoder (ported from IndaloTech ramses_esp) ---
+// RAMSES transmits every byte as UART async serial: bit-reversed, wrapped with
+// start/stop framing bits, then bit-packed into CC1101 FIFO octets. Without this
+// framing the fan's UART-based receiver cannot decode our packets. (RX is
+// unaffected: the ESP's UART hardware strips the framing on the way in.)
+static uint8_t tx_swap4(uint8_t in) {
+  static const uint8_t out[16] = {0x0, 0x8, 0x4, 0xC, 0x2, 0xA, 0x6, 0xE,
+                                  0x1, 0x9, 0x5, 0xD, 0x3, 0xB, 0x7, 0xF};
+  return out[in & 0x0F];
+}
+static uint8_t tx_swap8(uint8_t in) {
+  return static_cast<uint8_t>((tx_swap4(in) << 4) | tx_swap4(in >> 4));
+}
 
-  // Collect unencoded packet bytes
-  std::vector<uint8_t> raw_bytes;
-  raw_bytes.push_back(ramses_encode_header(this->fields));
+std::vector<uint8_t> RamsesMessage::to_raw_frame() const {
+  // 1. Logical byte stream fed through the framing encoder:
+  //    prefix (preamble + sync + magic header) + manchester(message) + suffix.
+  std::vector<uint8_t> logical = {0x55, 0x55, 0x55, 0x55, 0x55,  // preamble
+                                  0xFF, 0x00,                     // sync word
+                                  0x33, 0x55, 0x53};              // magic header
+
+  std::vector<uint8_t> msg;
+  msg.push_back(ramses_encode_header(this->fields));
   for (uint8_t i = 0; i < RAMSES_MAX_ADDR; i++) {
     if (this->fields & (RAMSES_F_ADDR0 << i)) {
-      raw_bytes.push_back(this->addr[i][0]);
-      raw_bytes.push_back(this->addr[i][1]);
-      raw_bytes.push_back(this->addr[i][2]);
+      msg.push_back(this->addr[i][0]);
+      msg.push_back(this->addr[i][1]);
+      msg.push_back(this->addr[i][2]);
     }
   }
-  if (this->fields & RAMSES_F_PARAM0) raw_bytes.push_back(this->param[0]);
-  if (this->fields & RAMSES_F_PARAM1) raw_bytes.push_back(this->param[1]);
-  raw_bytes.push_back(this->opcode[0]);
-  raw_bytes.push_back(this->opcode[1]);
-  raw_bytes.push_back(this->len);
-  for (uint8_t i = 0; i < this->len; i++) {
-    raw_bytes.push_back(this->payload[i]);
+  if (this->fields & RAMSES_F_PARAM0) msg.push_back(this->param[0]);
+  if (this->fields & RAMSES_F_PARAM1) msg.push_back(this->param[1]);
+  msg.push_back(this->opcode[0]);
+  msg.push_back(this->opcode[1]);
+  msg.push_back(this->len);
+  for (uint8_t i = 0; i < this->len; i++) msg.push_back(this->payload[i]);
+  msg.push_back(this->calculate_checksum());
+  for (uint8_t b : msg) {
+    logical.push_back(manchester_encode((b >> 4) & 0x0F));
+    logical.push_back(manchester_encode(b & 0x0F));
   }
-  raw_bytes.push_back(this->calculate_checksum());
+  logical.push_back(0x35);  // trailer
+  logical.push_back(0x55);  // training
 
-  // Manchester encode each byte (high nibble then low nibble)
-  for (uint8_t b : raw_bytes) {
-    frame.push_back(manchester_encode((b >> 4) & 0x0F));
-    frame.push_back(manchester_encode(b & 0x0F));
+  // 2. Bit-pack with UART framing into FIFO octets, after a prime + break.
+  //    (The native firmware needs a leading zero byte to start TX cleanly.)
+  std::vector<uint8_t> fifo = {0x00, 0xFF, 0x00, 0x00};
+
+  uint16_t reg = 0;  // high byte = output "data", low byte = pending "bits"
+  int tx_bits = 0;
+  auto insert_p = [&reg]() {
+    uint8_t d = static_cast<uint8_t>(((((reg >> 8) & 0xFF) << 1) | 1) & 0xFF);
+    reg = static_cast<uint16_t>((reg & 0x00FF) | (d << 8));
+  };
+  auto insert_s = [&reg]() {
+    uint8_t d = static_cast<uint8_t>((((reg >> 8) & 0xFF) << 1) & 0xFF);
+    reg = static_cast<uint16_t>((reg & 0x00FF) | (d << 8));
+  };
+  auto send = [&reg](int n) { reg = static_cast<uint16_t>(reg << n); };
+  auto emit = [&]() { fifo.push_back(static_cast<uint8_t>((reg >> 8) & 0xFF)); };
+
+  for (uint8_t byte : logical) {
+    reg = static_cast<uint16_t>((reg & 0xFF00) | tx_swap8(byte));  // load data bits
+    switch (tx_bits) {
+      case 0: insert_p(); insert_s(); send(6); emit(); send(2); tx_bits = 2; break;
+      case 2: insert_p(); insert_s(); send(4); emit(); send(4); tx_bits = 4; break;
+      case 4:
+        insert_p(); insert_s(); send(2); emit(); send(6);
+        insert_p(); insert_s(); emit(); tx_bits = 8;
+        break;
+      case 6: insert_p(); insert_s(); emit(); tx_bits = 8; break;
+      case 8: send(8); emit(); tx_bits = 0; break;
+    }
   }
+  // Flush pending bits, then leave the line idle (SPACE = all ones).
+  if (tx_bits) { send(8 - tx_bits); emit(); }
+  reg = static_cast<uint16_t>((reg & 0x00FF) | (0xFF << 8));
+  emit();
 
-  // Trailer & trailing training
-  frame.push_back(0x35);
-  frame.push_back(0x55);
-  return frame;
+  return fifo;
 }
 
 } // namespace ramses_esp

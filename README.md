@@ -97,7 +97,24 @@ State readback (`31D9 003 0000XX`): `00` Away / `01` Low / `02` Medium / `03` Hi
 
 - The RAMSES component is **vendored locally** (`components/ramses_esp/`) and loaded
   via `external_components: - source: components`, so builds are self-contained and
-  reproducible with no network fetch. It carries a heap-corruption fix over upstream
-  — see `components/ramses_esp/LOCAL_CHANGES.md`.
+  reproducible with no network fetch. It carries several fixes over upstream (heap
+  corruption, TX UART-framing, the RQ→I verb, and the GDO0-based TX transport that
+  makes transmit reliable) — see `components/ramses_esp/LOCAL_CHANGES.md`.
 - This impersonates a remote your fan already knows; it does not pair. The physical
   remote keeps working.
+
+## Troubleshooting (learned the hard way)
+
+- **After flashing ESPHome over other firmware, power-cycle the board once.** A soft
+  reset (OTA/USB re-flash) doesn't reset the CC1101, which can latch in a dead RX
+  state. Unplug ~15 s. Later ESPHome OTA updates don't need this.
+- **RX works but the fan ignores commands?** That was a chain of causes, all fixed
+  here — but if you fork/modify: (a) the transmit must add async UART framing, not
+  just Manchester; (b) the message verb must be `I` (not `RQ`, or the fan just
+  replies); (c) feed the TX FIFO from the **hardware GDO0 flag**, not the `TXBYTES`
+  register (erratum) — this was the difference between "works sometimes" and
+  "reliable".
+- **`gdo0_pin` = UART RX (CC1101 GDO2); `gdo2_pin` = CC1101 GDO0 (TX data + FIFO
+  flag).** Confusingly named, but that's the mapping. Get it wrong and RX is silent.
+- A steady `FREQEST` offset on received frames (~+42 / 66 kHz on this board) is just
+  crystal tolerance and is **harmless** — RX compensates via AFC, TX works anyway.

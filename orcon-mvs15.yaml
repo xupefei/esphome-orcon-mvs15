@@ -84,14 +84,20 @@ ramses_esp:
   sck_pin: GPIO36
   mosi_pin: GPIO35
   miso_pin: GPIO37
-  gdo0_pin: GPIO39       # CC1101 GDO0 -> ESP RX. Carries the raw bitstream via UART.
-  gdo2_pin: GPIO40       # optional
+  # NOTE: in this component `gdo0_pin` is the UART *RX* pin and `gdo2_pin` is the
+  # UART *TX* pin. The CC1101 emits demodulated RX data on GDO2 (IOCFG2=0x0D) and
+  # takes TX data on GDO0 — so UART RX must sit on the board's GDO2, and TX on GDO0.
+  # This matches the native firmware's uart_set_pin(tx=GDO0, rx=GDO2).
+  gdo0_pin: GPIO40       # UART RX  <- CC1101 GDO2 (demodulated data out) = board GPIO40
+  gdo2_pin: GPIO39       # UART TX  -> CC1101 GDO0 (TX data)              = board GPIO39
   # uart_num: 1          # default
   on_message:
     - lambda: |-
         // The fan announces its current speed unprompted:
         //   ... 31D9 003 0000XX   where XX = 00 Away / 01 Low / 02 Med / 03 High / 04 Auto
+        // Only react to OUR fan (the network has several 29:x units + sensors).
         const std::string &s = x;
+        if (s.find("${fan_id}") == std::string::npos) return;
         auto p = s.find("31D9 003 ");
         if (p == std::string::npos) return;
         if (p + 15 > s.size()) return;
@@ -129,6 +135,20 @@ script:
       - output.turn_on: led_tx
       - delay: 40ms
       - output.turn_off: led_tx
+  # Send a RAMSES command several times, SPACED OUT over ~1s, to beat RF
+  # collisions in a busy 868 MHz band (a single tight burst gets stepped on by
+  # neighbouring devices). Non-blocking; restarts if a new command arrives.
+  - id: send_ramses
+    parameters:
+      cmd: string
+    mode: restart
+    then:
+      - repeat:
+          count: 6
+          then:
+            - lambda: "if (!cmd.empty()) id(ramses_hub).send_hgi80_command(cmd);"
+            - script.execute: blink_tx
+            - delay: 200ms
 
 # -----------------------------------------------------------------------------
 # Speed control (22F1) — one HA entity, verified payloads
@@ -148,9 +168,9 @@ select:
           else if (x == "Medium") cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000204";
           else if (x == "High")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000304";
           else if (x == "Auto")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000404";
-          if (!cmd.empty()) id(ramses_hub).send_hgi80_command(cmd);
+          // Fire the command as a spaced-out repeat burst (see send_ramses).
+          if (!cmd.empty()) id(send_ramses).execute(cmd);
           id(orcon_speed).publish_state(x);
-      - script.execute: blink_tx      # flash green on send
 
 # -----------------------------------------------------------------------------
 # Timed boost (22F3) — 15 / 30 / 60 min at High, then return to previous
@@ -160,23 +180,23 @@ button:
     name: "Boost 15 min"
     icon: mdi:timer
     on_press:
-      - script.execute: blink_tx
-      - ramses_esp.send_hgi80:
-          command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00020F03040000"
+      - script.execute:
+          id: send_ramses
+          cmd: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00020F03040000"
   - platform: template
     name: "Boost 30 min"
     icon: mdi:timer
     on_press:
-      - script.execute: blink_tx
-      - ramses_esp.send_hgi80:
-          command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00021E03040000"
+      - script.execute:
+          id: send_ramses
+          cmd: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00021E03040000"
   - platform: template
     name: "Boost 60 min"
     icon: mdi:timer
     on_press:
-      - script.execute: blink_tx
-      - ramses_esp.send_hgi80:
-          command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00023C03040000"
+      - script.execute:
+          id: send_ramses
+          cmd: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00023C03040000"
 
   # Manual restart, and the target for the weekly scheduled reboot.
   - platform: restart
