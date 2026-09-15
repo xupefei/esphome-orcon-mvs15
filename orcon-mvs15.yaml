@@ -1,0 +1,179 @@
+# =============================================================================
+# Orcon MVS-15 ventilation control over 868.3 MHz RAMSES II
+# -----------------------------------------------------------------------------
+# ESP32 + CC1101, impersonating your 15RF remote to command the fan.
+# No pairing needed: each frame carries the remote's source address, and the
+# fan already trusts it.
+#
+# Transport component: https://github.com/wlcrs/esphome-ramses  (needs ESP-IDF)
+# Payloads: your own sniffed + verified 22F1 / 22F3 / 31D9 frames.
+#
+# Device addresses (from your sniff):
+#   fan (MVS-15) .......... 29:227117
+#   remote (we send AS) ... 29:160126
+#   this gateway's HGI id .. 18:152992  (informational; not used in frames)
+# =============================================================================
+
+substitutions:
+  name: orcon-mvs15
+  friendly_name: Orcon Ventilation
+  remote_id: "29:160126"   # address this gateway transmits AS (your real remote)
+  fan_id: "29:227117"      # the MVS-15 unit
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+# The RAMSES component uses FreeRTOS/ESP-IDF UART+SPI, so ESP-IDF is required.
+# IndaloTech ramses_esp board = ESP32-S3-WROOM-1 + E07-900MM10S (CC1101 @ 868 MHz).
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO          # bump to DEBUG while sniffing / commissioning
+api:
+ota:
+  - platform: esphome
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap: {}               # fallback hotspot
+
+# Self-hosted control page at http://<device-ip>/  (also http://${name}.local/)
+# local: true embeds the UI assets on the device, so it works with no internet.
+web_server:
+  port: 80
+  version: 3
+  local: true
+  # auth:              # uncomment to password-protect the page
+  #   username: admin
+  #   password: !secret web_password
+
+# -----------------------------------------------------------------------------
+# RAMSES II transport (CC1101 @ 868.3 MHz)
+# -----------------------------------------------------------------------------
+external_components:
+  - source: github://wlcrs/esphome-ramses
+    components: [ramses_esp]
+
+ramses_esp:
+  id: ramses_hub
+  # ---- CC1101 pins as wired on the IndaloTech ramses_esp ESP32-S3 board ----
+  # (from the firmware's Kconfig defaults; no external wiring needed).
+  cs_pin: GPIO38
+  sck_pin: GPIO36
+  mosi_pin: GPIO35
+  miso_pin: GPIO37
+  gdo0_pin: GPIO39       # CC1101 GDO0 -> ESP RX. Carries the raw bitstream via UART.
+  gdo2_pin: GPIO40       # optional
+  # uart_num: 1          # default
+  on_message:
+    - lambda: |-
+        // The fan announces its current speed unprompted:
+        //   ... 31D9 003 0000XX   where XX = 00 Away / 01 Low / 02 Med / 03 High / 04 Auto
+        const std::string &s = x;
+        auto p = s.find("31D9 003 ");
+        if (p == std::string::npos) return;
+        if (p + 15 > s.size()) return;
+        std::string b = s.substr(p + 13, 2);   // last payload byte
+        const char *st = nullptr;
+        if      (b == "00") st = "Away";
+        else if (b == "01") st = "Low";
+        else if (b == "02") st = "Medium";
+        else if (b == "03") st = "High";
+        else if (b == "04") st = "Auto";
+        if (st != nullptr) id(orcon_speed).publish_state(st);
+    - script.execute: blink_rx      # flash blue on any received frame
+
+# -----------------------------------------------------------------------------
+# Status LEDs (onboard, active-high): blue = RX activity, green = TX activity
+# -----------------------------------------------------------------------------
+output:
+  - platform: gpio
+    pin: GPIO42
+    id: led_rx        # blue
+  - platform: gpio
+    pin: GPIO41
+    id: led_tx        # green
+
+script:
+  - id: blink_rx
+    mode: restart
+    then:
+      - output.turn_on: led_rx
+      - delay: 40ms
+      - output.turn_off: led_rx
+  - id: blink_tx
+    mode: restart
+    then:
+      - output.turn_on: led_tx
+      - delay: 40ms
+      - output.turn_off: led_tx
+
+# -----------------------------------------------------------------------------
+# Speed control (22F1) — one HA entity, verified payloads
+# -----------------------------------------------------------------------------
+select:
+  - platform: template
+    name: "Speed"
+    id: orcon_speed
+    icon: mdi:fan
+    optimistic: false
+    options: ["Away", "Low", "Medium", "High", "Auto"]
+    set_action:
+      - lambda: |-
+          std::string cmd;
+          if      (x == "Away")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000004";
+          else if (x == "Low")    cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000104";
+          else if (x == "Medium") cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000204";
+          else if (x == "High")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000304";
+          else if (x == "Auto")   cmd = " I --- ${remote_id} ${fan_id} --:------ 22F1 003 000404";
+          if (!cmd.empty()) id(ramses_hub)->send_hgi80_command(cmd);
+          id(orcon_speed).publish_state(x);
+      - script.execute: blink_tx      # flash green on send
+
+# -----------------------------------------------------------------------------
+# Timed boost (22F3) — 15 / 30 / 60 min at High, then return to previous
+# -----------------------------------------------------------------------------
+button:
+  - platform: template
+    name: "Boost 15 min"
+    icon: mdi:timer
+    on_press:
+      - script.execute: blink_tx
+      - ramses_esp.send_hgi80:
+          command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00020F03040000"
+  - platform: template
+    name: "Boost 30 min"
+    icon: mdi:timer
+    on_press:
+      - script.execute: blink_tx
+      - ramses_esp.send_hgi80:
+          command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00021E03040000"
+  - platform: template
+    name: "Boost 60 min"
+    icon: mdi:timer
+    on_press:
+      - script.execute: blink_tx
+      - ramses_esp.send_hgi80:
+          command: " I --- ${remote_id} ${fan_id} --:------ 22F3 007 00023C03040000"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL — humidity readback (12A0). The fan replies to an RQ with an RP.
+# Uncomment and adapt the parse offset once you confirm the RP payload layout.
+# -----------------------------------------------------------------------------
+# interval:
+#   - interval: 5min
+#     then:
+#       - ramses_esp.send_hgi80:
+#           command: "RQ --- ${remote_id} ${fan_id} --:------ 12A0 001 00"
+#
+# sensor:
+#   - platform: template
+#     name: "Humidity"
+#     id: orcon_humidity
+#     unit_of_measurement: "%"
+#     device_class: humidity
+#     accuracy_decimals: 0
