@@ -25,6 +25,7 @@ void RamsesESPComponent::setup() {
   this->radio_mutex_ = xSemaphoreCreateMutex();
   this->rx_msg_queue_ = xQueueCreate(16, sizeof(RamsesMessage));
   this->tx_msg_queue_ = xQueueCreate(8, sizeof(RamsesMessage));
+  this->tx_isr_queue_ = xQueueCreate(32, 0);
 
   if (!this->cc1101_.init(SPI2_HOST, this->sck_pin_, this->mosi_pin_, this->miso_pin_, this->cs_pin_)) {
     ESP_LOGE(TAG, "Failed to initialize CC1101 transceiver!");
@@ -48,6 +49,12 @@ void RamsesESPComponent::setup() {
   gpio_reset_pin(this->gdo2_pin_);
   gpio_set_direction(this->gdo2_pin_, GPIO_MODE_INPUT);
   gpio_set_pull_mode(this->gdo2_pin_, GPIO_PULLDOWN_ONLY);
+  esp_err_t isr_result = gpio_install_isr_service(0);
+  if (isr_result != ESP_OK && isr_result != ESP_ERR_INVALID_STATE) {
+    ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s", esp_err_to_name(isr_result));
+    this->mark_failed();
+    return;
+  }
 
   xTaskCreatePinnedToCore(
       RamsesESPComponent::radio_task_trampoline,
@@ -66,14 +73,25 @@ void RamsesESPComponent::radio_task_trampoline(void *arg) {
   reinterpret_cast<RamsesESPComponent *>(arg)->radio_task();
 }
 
+void IRAM_ATTR RamsesESPComponent::tx_gdo0_isr(void *arg) {
+  auto *component = reinterpret_cast<RamsesESPComponent *>(arg);
+  gpio_intr_disable(component->gdo2_pin_);
+
+  BaseType_t task_woken = pdFALSE;
+  xQueueSendFromISR(component->tx_isr_queue_, nullptr, &task_woken);
+  if (task_woken == pdTRUE) portYIELD_FROM_ISR();
+}
+
 void RamsesESPComponent::radio_task() {
   ESP_LOGI(TAG, "RAMSES Radio task started");
   while (true) {
     if (!this->paused_) {
-      if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (!this->paused_) {
-          this->frame_handler_.work();
-        }
+      RamsesMessage pending;
+      if (this->tx_msg_queue_ != nullptr && xQueuePeek(this->tx_msg_queue_, &pending, 0) == pdTRUE) {
+        this->process_tx_queue();
+      }
+      if (!this->paused_ && xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (!this->paused_) this->frame_handler_.work();
         xSemaphoreGive(this->radio_mutex_);
       }
     }
@@ -147,9 +165,6 @@ void RamsesESPComponent::loop() {
 
   this->handle_tcp_clients();
 
-  if (!this->paused_) {
-    this->process_tx_queue();
-  }
 }
 
 void RamsesESPComponent::handle_tcp_clients() {
@@ -235,38 +250,58 @@ void RamsesESPComponent::process_tx_queue() {
       this->frame_handler_.rx_disable();
       std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
 
-      this->cc1101_.enter_tx_mode();
       size_t sent = 0;
-      while (sent < std::min<size_t>(4, raw_frame.size())) {
-        this->cc1101_.write_fifo(raw_frame[sent++]);
+      auto write_block = [&]() {
+        size_t block_end = std::min(sent + 5, raw_frame.size());
+        while (sent < block_end) this->cc1101_.write_fifo(raw_frame[sent++]);
+      };
+
+      size_t initial_size = std::min<size_t>(60, raw_frame.size());
+      this->cc1101_.enter_tx_mode(raw_frame.data(), initial_size);
+      sent = initial_size;
+      while (sent < raw_frame.size() && gpio_get_level(this->gdo2_pin_) == 0) write_block();
+
+      enum TxState { TX_FILL, TX_WAIT_EMPTY };
+      TxState tx_state = sent == raw_frame.size() ? TX_WAIT_EMPTY : TX_FILL;
+      bool tx_done = false;
+      bool tx_timeout = false;
+      xQueueReset(this->tx_isr_queue_);
+      if (tx_state == TX_WAIT_EMPTY) this->cc1101_.fifo_end();
+      gpio_set_intr_type(this->gdo2_pin_,
+                         tx_state == TX_FILL ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE);
+      gpio_isr_handler_add(this->gdo2_pin_, RamsesESPComponent::tx_gdo0_isr, this);
+
+      while (!tx_done) {
+        if (xQueueReceive(this->tx_isr_queue_, nullptr, pdMS_TO_TICKS(300)) != pdTRUE) {
+          tx_timeout = true;
+          break;
+        }
+
+        if (tx_state == TX_FILL) {
+          write_block();
+          if (sent == raw_frame.size()) {
+            this->cc1101_.fifo_end();
+            tx_state = TX_WAIT_EMPTY;
+            gpio_set_intr_type(this->gdo2_pin_, GPIO_INTR_POSEDGE);
+          }
+        } else {
+          tx_done = true;
+        }
+        gpio_intr_enable(this->gdo2_pin_);
       }
 
-      uint32_t feed_start = millis();
-      while (sent < raw_frame.size() && millis() - feed_start < 300) {
-        if (gpio_get_level(this->gdo2_pin_) == 0) {
-          size_t block_end = std::min(sent + 5, raw_frame.size());
-          while (sent < block_end) this->cc1101_.write_fifo(raw_frame[sent++]);
-        }
-      }
+      gpio_intr_disable(this->gdo2_pin_);
+      gpio_isr_handler_remove(this->gdo2_pin_);
+      xQueueReset(this->tx_isr_queue_);
 
-      if (sent != raw_frame.size()) {
-        ESP_LOGW(TAG, "TX FIFO feed timed out (%u/%u bytes)",
-                 (unsigned) sent, (unsigned) raw_frame.size());
-      } else {
-        this->cc1101_.fifo_end();
-        uint32_t empty_start = millis();
-        while (gpio_get_level(this->gdo2_pin_) == 0 && millis() - empty_start < 100) {
-          vTaskDelay(pdMS_TO_TICKS(1));
-        }
-        if (gpio_get_level(this->gdo2_pin_) == 0) {
-          ESP_LOGW(TAG, "TX FIFO-empty signal timed out");
-        }
+      if (tx_timeout || sent != raw_frame.size()) {
+        ESP_LOGW(TAG, "TX FIFO feed timed out (%u/%u bytes, MARCSTATE=0x%02X, GDO0=%d)",
+                 (unsigned) sent, (unsigned) raw_frame.size(),
+                 this->cc1101_.read_reg(CC_MARCSTATE), gpio_get_level(this->gdo2_pin_));
       }
-      this->cc1101_.enter_idle_mode();
-      this->last_tx_ms_ = millis();
-
-      this->cc1101_.apply_ramses_config();
+      this->cc1101_.enter_rx_mode();
       this->frame_handler_.rx_enable();
+      this->last_tx_ms_ = millis();
 
       xSemaphoreGive(this->radio_mutex_);
     }

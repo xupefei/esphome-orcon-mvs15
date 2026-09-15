@@ -25,8 +25,8 @@
 ## Important implementation details
 
 - `RamsesMessage` must remain trivially copyable because FreeRTOS queues use `memcpy`.
-- TX uses the factory 1 MHz SPI configuration, five-byte FIFO threshold, `0xC3`
-  PA entry, GDO0-paced FIFO writes, FIFO-empty completion, and 50 ms frame guard.
+- TX uses 1 MHz SPI, an initial FIFO preload, GDO0 interrupt-driven refills and
+  completion, direct RX recovery, and a 50 ms frame guard.
 - TX frames use the factory UART/Manchester encoder and the `I` verb.
 - A full power cycle may be needed once after replacing non-ESPHome firmware.
 

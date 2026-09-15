@@ -112,8 +112,7 @@ State readback (`31D9 003 0000XX`): `00` Away / `01` Low / `02` Medium / `03` Hi
   and GDO0-paced FIFO writes. Do not poll `TXBYTES` (CC1101 erratum).
 - **`gdo0_pin` = UART RX (CC1101 GDO2); `gdo2_pin` = CC1101 GDO0 (TX data + FIFO
   flag).** Confusingly named, but that's the mapping. Get it wrong and RX is silent.
-- TX mirrors the factory firmware's proven radio path: 1 MHz SPI, five-byte FIFO
-  threshold, one `0xC3` PA-table entry, STX before FIFO priming, GDO0-paced
-  five-octet fills, hardware FIFO-empty completion, and a 50 ms inter-frame guard.
+- TX uses 1 MHz SPI, an initial FIFO preload, GDO0 interrupt-driven refills and
+  completion, direct RX recovery, and a 50 ms inter-frame guard.
 - A steady `FREQEST` offset on received frames (~+42 / 66 kHz on this board) is just
   crystal tolerance and is **harmless** — RX compensates via AFC, TX works anyway.

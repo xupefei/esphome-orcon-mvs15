@@ -53,6 +53,7 @@ class RamsesESPComponent : public Component {
   void process_tx_queue();
 
   static void radio_task_trampoline(void *arg);
+  static void tx_gdo0_isr(void *arg);
   void radio_task();
 
   gpio_num_t sck_pin_{GPIO_NUM_NC};
@@ -71,6 +72,7 @@ class RamsesESPComponent : public Component {
   SemaphoreHandle_t radio_mutex_{nullptr};
   QueueHandle_t rx_msg_queue_{nullptr};
   QueueHandle_t tx_msg_queue_{nullptr};
+  QueueHandle_t tx_isr_queue_{nullptr};
 
   int server_fd_{-1};
   std::vector<int> client_fds_;

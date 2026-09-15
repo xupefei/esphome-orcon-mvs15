@@ -10,9 +10,9 @@ under the included MIT license.
 2. **TX encoding:** added the IndaloTech UART framing, Manchester encoding,
    prime/break prefix, trailer, and training bytes.
 3. **Message verb:** write the parsed `I`/`RQ`/`W`/`RP` verb into the encoded fields.
-4. **Factory TX transport:** use 1 MHz SPI, a five-byte FIFO threshold, one `0xC3`
-   PA entry, STX before priming, GDO0-paced five-octet blocks, FIFO-empty completion,
-   and a 50 ms RX/TX frame guard. No `TXBYTES` reads are used.
+4. **TX transport:** use 1 MHz SPI, one `0xC3` PA entry, an initial FIFO preload,
+   GDO0 interrupt-driven refills and completion, direct RX recovery, and a 50 ms
+   frame guard. No `TXBYTES` reads are used.
 
 ## Board notes
 

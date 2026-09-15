@@ -169,8 +169,8 @@ void CC1101Driver::write_fifo_burst(const uint8_t *data, size_t len) {
   std::vector<uint8_t> buf(len + 1);
   buf[0] = CC_FIFO | CC_BURST;
   memcpy(buf.data() + 1, data, len);
-  uint8_t status = 0;
-  this->spi_write_bytes(&status, buf.data(), buf.size());
+  std::vector<uint8_t> status(buf.size());
+  this->spi_write_bytes(status.data(), buf.data(), buf.size());
 }
 
 void CC1101Driver::enter_idle_mode() {
@@ -189,14 +189,14 @@ void CC1101Driver::enter_rx_mode() {
   }
 }
 
-void CC1101Driver::enter_tx_mode() {
+void CC1101Driver::enter_tx_mode(const uint8_t *initial_data, size_t len) {
   this->enter_idle_mode();
-  this->write_reg(CC_PKTCTRL0, 0x02); // Fifo mode, infinite packet
-  this->write_reg(CC_IOCFG0, 0x03);   // Falling edge, TX Fifo low
+  this->write_reg(CC_PKTCTRL0, 0x02);
+  this->write_reg(CC_IOCFG0, 0x02);
   this->strobe(CC_SFTX);
   while (CC_STATE(this->strobe(CC_STX)) != CC_STATE_TX) {
-    delayMicroseconds(10);
   }
+  this->write_fifo_burst(initial_data, len);
 }
 
 void CC1101Driver::fifo_end() {
